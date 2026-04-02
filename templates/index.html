@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XHS Extractor ✦ 小红书提取器</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Bungee&family=Bungee+Shade&family=Nunito:wght@400;700;900&family=Press+Start+2P&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Decorative floating elements -->
+    <div class="deco deco-star deco-1">✦</div>
+    <div class="deco deco-star deco-2">★</div>
+    <div class="deco deco-star deco-3">✦</div>
+    <div class="deco deco-dot deco-4">●</div>
+    <div class="deco deco-dot deco-5">●</div>
+
+    <!-- Header -->
+    <header class="header">
+        <div class="logo-area">
+            <div class="logo-icon">
+                <span class="pixel-book">📕</span>
+            </div>
+            <h1 class="logo-text">
+                <span class="logo-line1">XHS</span>
+                <span class="logo-line2">EXTRACTOR</span>
+            </h1>
+            <div class="logo-doodle">
+                <svg width="60" height="50" viewBox="0 0 60 50">
+                    <circle cx="30" cy="20" r="16" fill="#FF4B8B" stroke="#1A1A1A" stroke-width="3"/>
+                    <circle cx="24" cy="16" r="3" fill="#1A1A1A"/>
+                    <circle cx="36" cy="16" r="3" fill="#1A1A1A"/>
+                    <path d="M24 26 Q30 32 36 26" stroke="#1A1A1A" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+                    <line x1="20" y1="6" x2="16" y2="0" stroke="#1A1A1A" stroke-width="2.5" stroke-linecap="round"/>
+                    <line x1="40" y1="6" x2="44" y2="0" stroke="#1A1A1A" stroke-width="2.5" stroke-linecap="round"/>
+                </svg>
+            </div>
+        </div>
+        <p class="subtitle">一键提取小红书笔记图片和文字 ✦ 原始像素品质</p>
+    </header>
+
+    <!-- Input Section -->
+    <section class="input-section">
+        <div class="bubble-title">
+            <span>PASTE & EXTRACT</span>
+        </div>
+        <div class="input-box">
+            <input type="text" id="urlInput" placeholder="粘贴小红书链接到这里... 🔗" autocomplete="off">
+            <button id="extractBtn" class="btn btn-extract" onclick="handleExtract()">
+                <span class="btn-text">提取!</span>
+                <span class="btn-loading" style="display:none;">
+                    <span class="spinner"></span>
+                </span>
+            </button>
+        </div>
+        <div class="input-hint">
+            支持 xiaohongshu.com 和 xhslink.com 短链接
+        </div>
+    </section>
+
+    <!-- Error display -->
+    <div id="errorBox" class="error-box" style="display:none;">
+        <span class="error-icon">💥</span>
+        <span id="errorText"></span>
+        <button class="error-close" onclick="hideError()">✕</button>
+    </div>
+
+    <!-- Results Section -->
+    <section id="resultSection" class="result-section" style="display:none;">
+
+        <!-- Pink divider -->
+        <div class="pink-divider">
+            <div class="divider-inner"></div>
+        </div>
+
+        <div class="bubble-title bubble-title-green">
+            <span>RESULTS ✦ 提取结果</span>
+        </div>
+
+        <!-- Text Content Card -->
+        <div class="card text-card">
+            <div class="card-header">
+                <div class="author-info">
+                    <img id="authorAvatar" class="avatar" src="" alt="" style="display:none;">
+                    <div>
+                        <h2 id="noteTitle" class="note-title"></h2>
+                        <span id="authorName" class="author-name"></span>
+                    </div>
+                </div>
+                <button class="btn btn-small btn-copy" onclick="copyText()">
+                    📋 复制文字
+                </button>
+            </div>
+            <div class="card-body">
+                <p id="noteDesc" class="note-desc"></p>
+                <div id="noteTags" class="note-tags"></div>
+            </div>
+            <div class="card-footer">
+                <span class="stat">❤️ <span id="statLikes">0</span></span>
+                <span class="stat">⭐ <span id="statCollects">0</span></span>
+                <span class="stat">💬 <span id="statComments">0</span></span>
+            </div>
+        </div>
+
+        <!-- Image Gallery -->
+        <div class="bubble-title bubble-title-pink">
+            <span>IMAGES ✦ 原图</span>
+        </div>
+
+        <div id="imageGallery" class="image-gallery"></div>
+
+        <!-- Action buttons -->
+        <div class="action-bar">
+            <button class="btn btn-download" onclick="downloadAll()">
+                📥 下载全部图片
+            </button>
+            <button class="btn btn-ai" onclick="handleSummarize()">
+                🤖 AI 智能总结
+            </button>
+        </div>
+
+        <!-- AI Summary Card -->
+        <div id="summaryCard" class="card summary-card" style="display:none;">
+            <div class="card-header">
+                <h3>🤖 AI 总结</h3>
+                <div class="ai-badge">POWERED BY LLM</div>
+            </div>
+            <div class="card-body">
+                <div id="summaryLoading" class="summary-loading" style="display:none;">
+                    <span class="spinner spinner-large"></span>
+                    <span>AI 正在分析中...</span>
+                </div>
+                <div id="summaryText" class="summary-text"></div>
+            </div>
+        </div>
+
+        <!-- Green divider -->
+        <div class="green-divider">
+            <div class="divider-inner"></div>
+        </div>
+    </section>
+
+    <!-- Image Lightbox -->
+    <div id="lightbox" class="lightbox" style="display:none;" onclick="closeLightbox(event)">
+        <button class="lightbox-close" onclick="closeLightbox()">✕</button>
+        <button class="lightbox-nav lightbox-prev" onclick="navigateLightbox(-1, event)">‹</button>
+        <img id="lightboxImg" class="lightbox-img" src="" alt="">
+        <button class="lightbox-nav lightbox-next" onclick="navigateLightbox(1, event)">›</button>
+        <div class="lightbox-counter">
+            <span id="lightboxCurrent">1</span> / <span id="lightboxTotal">1</span>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-content">
+            <div class="footer-doodle">
+                <svg width="40" height="40" viewBox="0 0 40 40">
+                    <rect x="5" y="5" width="30" height="30" rx="5" fill="#4BDB6A" stroke="#1A1A1A" stroke-width="3"/>
+                    <circle cx="15" cy="18" r="3" fill="#1A1A1A"/>
+                    <circle cx="25" cy="18" r="3" fill="#1A1A1A"/>
+                    <path d="M14 27 Q20 32 26 27" stroke="#1A1A1A" stroke-width="2" fill="none" stroke-linecap="round"/>
+                </svg>
+            </div>
+            <p>XHS Extractor ✦ Self-hosted Xiaohongshu Content Tool</p>
+        </div>
+    </footer>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
