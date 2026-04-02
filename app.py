@@ -34,9 +34,9 @@ def api_extract():
     if not url:
         return jsonify({"error": "请输入小红书笔记链接"}), 400
 
-    # Basic URL validation
-    if not any(domain in url for domain in ["xiaohongshu.com", "xhslink.com"]):
-        return jsonify({"error": "请输入有效的小红书链接"}), 400
+    # Basic validation: must contain XHS link somewhere in the text
+    if not any(domain in url for domain in ["xiaohongshu.com", "xhslink.com", "xhscdn.com"]):
+        return jsonify({"error": "未检测到小红书链接，请粘贴完整的分享文本"}), 400
 
     try:
         result = extract_note(url, cookie=XHS_COOKIE)

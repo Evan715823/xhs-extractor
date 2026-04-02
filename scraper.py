@@ -30,6 +30,15 @@ def _build_headers(cookie: str = "") -> dict:
     return headers
 
 
+def _extract_url_from_text(text: str) -> str:
+    """Extract XHS URL from share text like '标题... http://xhslink.com/xxx copy and open...'"""
+    # Match xhslink.com or xiaohongshu.com URLs
+    match = re.search(r'https?://[^\s]+(?:xhslink\.com|xiaohongshu\.com)[^\s]*', text)
+    if match:
+        return match.group(0).rstrip('.,;!?)')
+    return text.strip()
+
+
 def _resolve_short_url(url: str, cookie: str = "") -> str:
     """Resolve xhslink.com short URLs to full xiaohongshu.com URLs."""
     if "xhslink.com" not in url:
@@ -91,6 +100,8 @@ def extract_note(url: str, cookie: str = "") -> dict:
             "type": "normal" | "video",
         }
     """
+    # Extract URL from share text (e.g. "标题... http://xhslink.com/xxx copy and open...")
+    url = _extract_url_from_text(url)
     # Resolve short links
     resolved_url = _resolve_short_url(url, cookie)
     note_id = _extract_note_id(resolved_url)
