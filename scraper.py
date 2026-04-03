@@ -5,6 +5,9 @@ Extracts images, text, and metadata from Xiaohongshu note URLs.
 
 import json
 import re
+import time
+from functools import lru_cache
+from hashlib import md5
 
 import httpx
 from bs4 import BeautifulSoup
@@ -20,6 +23,22 @@ HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
 
+# Shared connection pool — reused across all proxy requests
+_http_pool = httpx.Client(
+    follow_redirects=True,
+    headers={
+        "User-Agent": HEADERS["User-Agent"],
+        "Referer": "https://www.xiaohongshu.com/",
+    },
+    timeout=30,
+    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+)
+
+# Simple TTL cache for proxied images: {url_hash: (bytes, content_type, timestamp)}
+_image_cache: dict[str, tuple[bytes, str, float]] = {}
+_CACHE_TTL = 3600  # 1 hour
+_CACHE_MAX = 200   # max entries
+
 
 def _build_headers(cookie: str = "", referer: str = "https://www.xiaohongshu.com/") -> dict:
     headers = HEADERS.copy()
@@ -27,6 +46,19 @@ def _build_headers(cookie: str = "", referer: str = "https://www.xiaohongshu.com
     if cookie:
         headers["Cookie"] = cookie
     return headers
+
+
+def _retry(fn, retries=2, delay=1.0):
+    """Retry a callable with exponential backoff."""
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except (httpx.HTTPError, httpx.TimeoutException) as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(delay * (2 ** attempt))
+    raise last_err
 
 
 def _extract_url_from_text(text: str) -> str:
@@ -42,9 +74,13 @@ def _resolve_short_url(url: str, cookie: str = "") -> str:
     if "xhslink.com" not in url:
         return url
     headers = _build_headers(cookie, referer="https://www.xiaohongshu.com/")
-    with httpx.Client(follow_redirects=True, headers=headers, timeout=15) as client:
-        resp = client.get(url)
-        return str(resp.url)
+
+    def do_resolve():
+        with httpx.Client(follow_redirects=True, headers=headers, timeout=15) as client:
+            resp = client.get(url)
+            return str(resp.url)
+
+    return _retry(do_resolve)
 
 
 def _extract_note_id(url: str) -> str | None:
@@ -65,14 +101,12 @@ def _extract_note_id(url: str) -> str | None:
 
 def _clean_image_url(url: str) -> str:
     """Remove image processing parameters to get original quality without watermark."""
-    # Remove query params that control image size/compression
     if "?" in url:
         base = url.split("?")[0]
     else:
         base = url
-    # Remove XHS image processing suffix (e.g. !h5_1080jpg) which adds watermark
-    if "!" in base:
-        base = base.split("!")[0]
+    # Remove XHS image processing suffix (e.g. !h5_1080jpg, !k, @500w)
+    base = re.split(r'[!@]', base)[0]
     if base.startswith("http://"):
         base = "https://" + base[7:]
     if not base.startswith("http"):
@@ -85,13 +119,17 @@ _ORIGINAL_CDN = "https://sns-img-bd.xhscdn.com"
 
 
 def _fix_json_text(text: str) -> str:
-    """Fix XHS's non-standard JSON (undefined values, etc.)."""
+    """Fix XHS's non-standard JSON (undefined, NaN, Infinity, etc.)."""
     text = text.replace("undefined", "null")
+    text = re.sub(r'\bNaN\b', "null", text)
+    text = re.sub(r'\bInfinity\b', "null", text)
     return text
 
 
-def _parse_initial_state(soup: BeautifulSoup, note_id: str) -> dict | None:
-    """Try to extract note data from __INITIAL_STATE__ script tag."""
+def _parse_initial_state(soup: BeautifulSoup, note_id: str) -> tuple[dict | None, dict | None]:
+    """Try to extract note data and full state from __INITIAL_STATE__ script tag.
+    Returns (note_data, full_state) for comment extraction.
+    """
     for script in soup.find_all("script"):
         text = script.string or ""
         if "window.__INITIAL_STATE__" in text:
@@ -100,7 +138,7 @@ def _parse_initial_state(soup: BeautifulSoup, note_id: str) -> dict | None:
             try:
                 state = json.loads(json_str)
             except json.JSONDecodeError:
-                return None
+                return None, None
 
             # New structure: noteData.data.noteData
             note_data = (
@@ -109,7 +147,7 @@ def _parse_initial_state(soup: BeautifulSoup, note_id: str) -> dict | None:
                 .get("noteData")
             )
             if note_data:
-                return note_data
+                return note_data, state
 
             # Legacy structure: note.noteDetailMap
             note_detail_map = state.get("note", {}).get("noteDetailMap", {})
@@ -120,8 +158,37 @@ def _parse_initial_state(soup: BeautifulSoup, note_id: str) -> dict | None:
                     if note_data:
                         break
 
-            return note_data
-    return None
+            return note_data, state
+    return None, None
+
+
+def _extract_comments(state: dict | None) -> list[dict]:
+    """Extract hot comments from __INITIAL_STATE__."""
+    if not state:
+        return []
+    comments = []
+
+    # Try multiple known paths for comment data
+    comment_data = state.get("commentData", {}).get("data", {})
+    comment_list = comment_data.get("comments", [])
+
+    if not comment_list:
+        # Legacy path
+        comment_data = state.get("comment", {})
+        comment_list = comment_data.get("commentList", [])
+
+    for c in comment_list[:20]:  # Cap at 20 comments
+        user = c.get("user", {}) or c.get("userInfo", {})
+        content = c.get("content", "")
+        nickname = user.get("nickname", "") or user.get("nickName", "")
+        likes = c.get("likeCount", 0) or c.get("likes", 0)
+        if content:
+            comments.append({
+                "user": nickname,
+                "content": content,
+                "likes": likes,
+            })
+    return comments
 
 
 def _parse_meta_tags(soup: BeautifulSoup) -> dict | None:
@@ -139,7 +206,6 @@ def _parse_meta_tags(soup: BeautifulSoup) -> dict | None:
 
     images = [_clean_image_url(image)] if image else []
 
-    # Try to find more images from JSON-LD
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             ld = json.loads(script.string or "")
@@ -178,21 +244,25 @@ def extract_note(url: str, cookie: str = "") -> dict:
     1. __INITIAL_STATE__ JSON parsing
     2. Open Graph meta tags
     """
+    # Input validation
+    if len(url) > 2048:
+        raise ValueError("输入文本过长")
+
     # Extract URL from share text
     url = _extract_url_from_text(url)
 
-    # Resolve short links
+    # Resolve short links (with retry)
     resolved_url = _resolve_short_url(url, cookie)
     note_id = _extract_note_id(resolved_url)
     if not note_id:
         raise ValueError(f"无法从 URL 中提取笔记ID: {resolved_url}")
 
-    # Preserve xsec_token and xsec_source from resolved URL (required by XHS anti-scraping)
+    # Preserve xsec_token and xsec_source from resolved URL
     xsec_token = _extract_xsec_token(resolved_url)
     xsec_source_match = re.search(r'[?&]xsec_source=([^&]+)', resolved_url)
     xsec_source = xsec_source_match.group(1) if xsec_source_match else ""
 
-    # Fetch the page — use resolved URL with tokens if available
+    # Fetch the page with retry
     page_url = f"https://www.xiaohongshu.com/explore/{note_id}"
     params = {}
     if xsec_token:
@@ -201,20 +271,24 @@ def extract_note(url: str, cookie: str = "") -> dict:
         params["xsec_source"] = xsec_source
     headers = _build_headers(cookie)
 
-    with httpx.Client(follow_redirects=True, headers=headers, timeout=20) as client:
-        resp = client.get(page_url, params=params)
-        resp.raise_for_status()
+    def do_fetch():
+        with httpx.Client(follow_redirects=True, headers=headers, timeout=20) as client:
+            resp = client.get(page_url, params=params)
+            resp.raise_for_status()
+            return resp.text
 
-    html = resp.text
+    html = _retry(do_fetch)
     soup = BeautifulSoup(html, "lxml")
 
     # Strategy 1: Parse __INITIAL_STATE__
-    note_data = _parse_initial_state(soup, note_id)
+    note_data, full_state = _parse_initial_state(soup, note_id)
 
     if note_data:
-        return _build_result_from_state(note_data, note_id)
+        result = _build_result_from_state(note_data, note_id)
+        result["comments"] = _extract_comments(full_state)
+        return result
 
-    # Strategy 2: Parse meta tags (works without cookie)
+    # Strategy 2: Parse meta tags
     meta_data = _parse_meta_tags(soup)
     if meta_data:
         return {
@@ -223,13 +297,15 @@ def extract_note(url: str, cookie: str = "") -> dict:
             "tags": [],
             "images": meta_data["images"],
             "video_url": "",
+            "video_streams": [],
             "author": meta_data["author"],
             "avatar": "",
             "likes": 0,
             "collects": 0,
-            "comments": 0,
+            "comments_count": 0,
             "note_id": note_id,
             "type": "normal",
+            "comments": [],
         }
 
     raise ValueError(
@@ -258,7 +334,6 @@ def _build_result_from_state(note_data: dict, note_id: str) -> dict:
     for img in image_list:
         file_id = img.get("fileId", "")
         if file_id:
-            # Use unsigned CDN with fileId for watermark-free original
             images.append(f"{_ORIGINAL_CDN}/{file_id}")
         else:
             info_list = img.get("infoList", [])
@@ -270,18 +345,36 @@ def _build_result_from_state(note_data: dict, note_id: str) -> dict:
             if best:
                 images.append(_clean_image_url(best))
 
-    # Video
+    # Video — collect all available streams for quality selection
     video = note_data.get("video", {})
     video_url = ""
+    video_streams = []
     if video:
         media = video.get("media", {})
         stream = media.get("stream", {})
-        for quality in ["h265", "h264", "av1"]:
-            streams = stream.get(quality, [])
-            if streams:
-                video_url = streams[0].get("masterUrl", "")
-                break
-        if not video_url:
+        for codec in ["h265", "h264", "av1"]:
+            codec_streams = stream.get(codec, [])
+            for s in codec_streams:
+                url = s.get("masterUrl", "")
+                if url:
+                    w = s.get("width", 0)
+                    h = s.get("height", 0)
+                    bitrate = s.get("videoBitrate", 0) or s.get("avgBitrate", 0)
+                    label = f"{h}p" if h else codec
+                    video_streams.append({
+                        "url": url,
+                        "codec": codec,
+                        "width": w,
+                        "height": h,
+                        "bitrate": bitrate,
+                        "label": f"{label} ({codec})",
+                    })
+        # Best quality as default
+        if video_streams:
+            # Sort by height descending, prefer h264 for compatibility
+            sorted_streams = sorted(video_streams, key=lambda s: (s["height"], s["codec"] == "h264"), reverse=True)
+            video_url = sorted_streams[0]["url"]
+        elif not video_url:
             video_url = video.get("url", "")
 
     # Author
@@ -306,24 +399,92 @@ def _build_result_from_state(note_data: dict, note_id: str) -> dict:
         "tags": tags,
         "images": images,
         "video_url": video_url,
+        "video_streams": video_streams,
         "author": author,
         "avatar": avatar,
         "likes": safe_int(interact.get("likedCount")),
         "collects": safe_int(interact.get("collectedCount")),
-        "comments": safe_int(interact.get("commentCount")),
+        "comments_count": safe_int(interact.get("commentCount")),
         "note_id": note_id,
         "type": note_type,
     }
 
 
+def _cache_cleanup():
+    """Evict expired or excess cache entries."""
+    now = time.time()
+    expired = [k for k, (_, _, ts) in _image_cache.items() if now - ts > _CACHE_TTL]
+    for k in expired:
+        del _image_cache[k]
+    # If still over limit, evict oldest
+    if len(_image_cache) > _CACHE_MAX:
+        sorted_keys = sorted(_image_cache, key=lambda k: _image_cache[k][2])
+        for k in sorted_keys[:len(_image_cache) - _CACHE_MAX]:
+            del _image_cache[k]
+
+
 def proxy_image(image_url: str, cookie: str = "") -> tuple[bytes, str]:
-    """Fetch image through proxy to bypass hotlink protection."""
+    """Fetch image through proxy with caching and content-type validation."""
+    cache_key = md5(image_url.encode()).hexdigest()
+
+    # Check cache
+    if cache_key in _image_cache:
+        data, ct, ts = _image_cache[cache_key]
+        if time.time() - ts < _CACHE_TTL:
+            return data, ct
+
+    def do_fetch():
+        resp = _http_pool.get(image_url)
+        resp.raise_for_status()
+        return resp
+
+    resp = _retry(do_fetch)
+    content_type = resp.headers.get("Content-Type", "image/jpeg")
+
+    # Content-type validation: only allow image types
+    if not content_type.startswith("image/"):
+        # Force safe content type to prevent XSS
+        content_type = "image/jpeg"
+
+    data = resp.content
+
+    # Cache it
+    _image_cache[cache_key] = (data, content_type, time.time())
+    if len(_image_cache) > _CACHE_MAX + 20:
+        _cache_cleanup()
+
+    return data, content_type
+
+
+def proxy_video_stream(video_url: str, range_header: str = "", cookie: str = ""):
+    """Stream video through proxy with Range request support for seeking."""
     headers = {
         "User-Agent": HEADERS["User-Agent"],
         "Referer": "https://www.xiaohongshu.com/",
     }
-    with httpx.Client(follow_redirects=True, headers=headers, timeout=30) as client:
-        resp = client.get(image_url)
-        resp.raise_for_status()
-    content_type = resp.headers.get("Content-Type", "image/jpeg")
-    return resp.content, content_type
+    if range_header:
+        headers["Range"] = range_header
+
+    client = httpx.Client(follow_redirects=True, headers=headers, timeout=60)
+    resp = client.send(
+        client.build_request("GET", video_url),
+        stream=True,
+    )
+    resp.raise_for_status()
+
+    def generate():
+        try:
+            for chunk in resp.iter_bytes(chunk_size=65536):
+                yield chunk
+        finally:
+            resp.close()
+            client.close()
+
+    return {
+        "status_code": resp.status_code,
+        "content_type": resp.headers.get("Content-Type", "video/mp4"),
+        "content_length": resp.headers.get("Content-Length", ""),
+        "content_range": resp.headers.get("Content-Range", ""),
+        "accept_ranges": resp.headers.get("Accept-Ranges", "bytes"),
+        "stream": generate(),
+    }

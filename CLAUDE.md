@@ -4,58 +4,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-XHS Extractor is a Flask-based web app that scrapes Xiaohongshu (小红书) notes to extract original-quality images, text, and tags, with optional AI summarization.
+XHS Extractor (小红书内容提取器) — a self-hosted Flask web app that extracts original-quality images and full text content from Xiaohongshu (Little Red Book) note URLs, with optional LLM-powered summarization.
 
-## Running the App
+## Running Locally
 
 ```bash
-# Local development
 pip install -r requirements.txt
-cp .env.example .env   # fill in LLM_API_KEY at minimum
-python app.py          # http://localhost:5000
-
-# Docker
-docker compose up -d --build
+cp .env.example .env   # then fill in LLM_API_KEY
+python app.py           # serves on http://localhost:5000
 ```
 
-No test suite or lint commands exist in this project.
+Docker: `docker compose up -d` (reads `.env` file).
 
-## Environment Variables (.env)
-
-| Variable | Default | Notes |
-|---|---|---|
-| `LLM_API_KEY` | — | Required |
-| `LLM_PROVIDER` | `grok` | `grok`, `openai`, or `anthropic` |
-| `LLM_MODEL` | `grok-3` | Also supports `grok-3-mini`, `gpt-4o`, `claude-sonnet-4-6` |
-| `LLM_BASE_URL` | — | Optional custom API endpoint |
-| `XHS_COOKIE` | — | Optional; needed for login-protected notes |
-| `FLASK_PORT` | `5000` | Cloud deployments override with `PORT` |
+Set `FLASK_DEBUG=true` in `.env` for auto-reload during development.
 
 ## Architecture
 
-```
-app.py          Flask routes and request handling
-scraper.py      Core XHS scraping logic (URL parsing → page fetch → data extraction)
-llm_service.py  Provider-agnostic LLM wrapper (Grok/OpenAI/Anthropic)
-static/app.js   Frontend: form handling, image gallery, lightbox, downloads
-templates/index.html  Single-page app shell
-```
+**Backend (Python/Flask):**
+- `app.py` — Flask routes: `/api/extract` (POST), `/api/proxy-image` (GET), `/api/download-all` (POST), `/api/summarize` (POST), and `/` (serves the SPA)
+- `scraper.py` — Core scraping logic. Resolves short URLs (`xhslink.com`), fetches note pages, extracts data via two fallback strategies: `__INITIAL_STATE__` JSON parsing, then Open Graph meta tags. Also handles image proxying to bypass hotlink protection.
+- `llm_service.py` — LLM abstraction supporting three providers via `LLM_PROVIDER` env var: `grok` (default, uses xAI's OpenAI-compatible API), `openai`, and `anthropic`. Each uses lazy imports.
 
-### API Endpoints
+**Frontend (vanilla JS, single-page):**
+- `templates/index.html` — Full page with inline SVG illustrations, pixel-art theme
+- `static/app.js` — All client logic: extract flow, result rendering, image lightbox, clipboard copy, ZIP download, AI summary
+- `static/style.css` — Styling
 
-- `POST /api/extract` — main extraction; input: `{url: "<share text or URL>"}`, output: note metadata + image URLs
-- `GET /api/proxy-image?url=...` — proxies XHS images (bypasses hotlink protection with correct Referer header)
-- `POST /api/download-all` — streams ZIP of all images
-- `POST /api/summarize` — sends title/desc/tags to configured LLM
+**Key design decisions:**
+- Images are proxied through `/api/proxy-image` to bypass XHS hotlink protection; `fileId` + unsigned CDN (`sns-img-bd.xhscdn.com`) is preferred for watermark-free originals
+- XHS anti-scraping tokens (`xsec_token`, `xsec_source`) are preserved from resolved URLs
+- The app uses `httpx` (not `requests`) for HTTP with redirect following
+- No database — everything is stateless and extracted on-the-fly
 
-### Scraper Fallback Chain (`scraper.py`)
+## Environment Variables
 
-1. Parse `__INITIAL_STATE__` JSON embedded in page HTML (primary path)
-2. Extract OpenGraph `<meta>` tags (fallback)
-3. Parse JSON-LD structured data (second fallback)
+Required: `LLM_API_KEY` (for AI summarization feature).
+Optional: `LLM_PROVIDER` (grok/openai/anthropic), `LLM_MODEL`, `LLM_BASE_URL`, `XHS_COOKIE` (for login-gated notes).
 
-The scraper uses iPhone Safari User-Agent to get mobile-optimized responses. It fixes malformed XHS JSON by replacing literal `undefined` with `null` before parsing.
+## Language
 
-### LLM Integration (`llm_service.py`)
-
-All three providers use an OpenAI-compatible client. Grok and OpenAI use `openai.OpenAI` with different `base_url`; Anthropic uses `anthropic.Anthropic`. The system prompt is in Chinese and requests structured content analysis.
+The UI and error messages are in Chinese (zh-CN). Code comments and docstrings are a mix of Chinese and English.
