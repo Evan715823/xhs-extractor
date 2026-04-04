@@ -117,6 +117,21 @@ def _clean_image_url(url: str) -> str:
 # CDN host that serves original images without watermark or signed URLs
 _ORIGINAL_CDN = "https://sns-img-bd.xhscdn.com"
 
+# CDN host for watermark-free videos
+_VIDEO_CDN_NO_WM = "https://sns-video-bd.xhscdn.com"
+
+
+def _get_nowatermark_video_url(stream_url: str, origin_video_key: str = "") -> str:
+    """Try to build a watermark-free video URL.
+
+    If originVideoKey is available (from video.consumer), use it.
+    Otherwise return the original stream URL as-is (XHS bakes watermarks
+    into /stream/ paths and no CDN bypass is currently available).
+    """
+    if origin_video_key:
+        return f"{_VIDEO_CDN_NO_WM}/{origin_video_key}"
+    return stream_url
+
 
 def _fix_json_text(text: str) -> str:
     """Fix XHS's non-standard JSON (undefined, NaN, Infinity, etc.)."""
@@ -350,6 +365,8 @@ def _build_result_from_state(note_data: dict, note_id: str) -> dict:
     video_url = ""
     video_streams = []
     if video:
+        consumer = video.get("consumer", {})
+        origin_video_key = consumer.get("originVideoKey", "")
         media = video.get("media", {})
         stream = media.get("stream", {})
         for codec in ["h265", "h264", "av1"]:
@@ -362,7 +379,8 @@ def _build_result_from_state(note_data: dict, note_id: str) -> dict:
                     bitrate = s.get("videoBitrate", 0) or s.get("avgBitrate", 0)
                     label = f"{h}p" if h else codec
                     video_streams.append({
-                        "url": url,
+                        "url": _get_nowatermark_video_url(url, origin_video_key),
+                        "url_wm": url,
                         "codec": codec,
                         "width": w,
                         "height": h,
@@ -371,7 +389,6 @@ def _build_result_from_state(note_data: dict, note_id: str) -> dict:
                     })
         # Best quality as default
         if video_streams:
-            # Sort by height descending, prefer h264 for compatibility
             sorted_streams = sorted(video_streams, key=lambda s: (s["height"], s["codec"] == "h264"), reverse=True)
             video_url = sorted_streams[0]["url"]
         elif not video_url:
@@ -386,10 +403,23 @@ def _build_result_from_state(note_data: dict, note_id: str) -> dict:
     interact = note_data.get("interactInfo", {})
 
     def safe_int(val):
-        if not val or val == "":
+        if val is None:
             return 0
-        try:
+        if isinstance(val, (int, float)):
             return int(val)
+        val = str(val).strip()
+        if not val:
+            return 0
+        # Handle Chinese units: "1.2万" -> 12000
+        m = re.match(r'^([\d.]+)\s*万$', val)
+        if m:
+            return int(float(m.group(1)) * 10000)
+        # Handle "k" suffix: "6.7k" -> 6700
+        m = re.match(r'^([\d.]+)\s*[kK]$', val)
+        if m:
+            return int(float(m.group(1)) * 1000)
+        try:
+            return int(float(val))
         except (ValueError, TypeError):
             return 0
 

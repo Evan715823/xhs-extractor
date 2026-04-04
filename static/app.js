@@ -1,12 +1,12 @@
 /**
- * XHS Extractor - Frontend Logic
+ * XHS Extractor - Frontend Logic (Editorial Curator Edition)
  * Features: extract, batch, paste-to-extract, history, video quality,
  *           comments, dark mode, download progress, mobile gestures, abort
  */
 
 let currentData = null;
 let lightboxIndex = 0;
-let extractController = null; // AbortController for cancellation
+let extractController = null;
 const HISTORY_KEY = 'xhs_extract_history';
 const HISTORY_MAX = 20;
 const THEME_KEY = 'xhs_theme';
@@ -24,19 +24,19 @@ document.addEventListener('DOMContentLoaded', () => {
 function loadTheme() {
     const saved = localStorage.getItem(THEME_KEY);
     if (saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-        document.documentElement.setAttribute('data-theme', 'dark');
+        document.documentElement.classList.add('dark');
     }
     updateThemeIcon();
 }
 
 function toggleTheme() {
     const html = document.documentElement;
-    const isDark = html.getAttribute('data-theme') === 'dark';
+    const isDark = html.classList.contains('dark');
     if (isDark) {
-        html.removeAttribute('data-theme');
+        html.classList.remove('dark');
         localStorage.setItem(THEME_KEY, 'light');
     } else {
-        html.setAttribute('data-theme', 'dark');
+        html.classList.add('dark');
         localStorage.setItem(THEME_KEY, 'dark');
     }
     updateThemeIcon();
@@ -45,8 +45,11 @@ function toggleTheme() {
 function updateThemeIcon() {
     const btn = document.getElementById('themeToggle');
     if (!btn) return;
-    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-    btn.textContent = isDark ? '☀' : '☾';
+    const isDark = document.documentElement.classList.contains('dark');
+    const icon = btn.querySelector('.material-symbols-outlined');
+    if (icon) {
+        icon.textContent = isDark ? 'light_mode' : 'dark_mode';
+    }
     btn.title = isDark ? '切换亮色' : '切换暗色';
 }
 
@@ -55,8 +58,7 @@ function updateThemeIcon() {
 function setupPasteHandler() {
     const input = document.getElementById('urlInput');
     if (!input) return;
-    input.addEventListener('paste', (e) => {
-        // Wait for paste to complete, then auto-extract
+    input.addEventListener('paste', () => {
         setTimeout(() => {
             const val = input.value.trim();
             if (val && (val.includes('xhslink.com') || val.includes('xiaohongshu.com'))) {
@@ -76,14 +78,12 @@ async function handleExtract() {
         return;
     }
 
-    // Check for batch mode (multiple lines)
     const lines = url.split('\n').map(l => l.trim()).filter(l => l);
     if (lines.length > 1) {
         handleBatchExtract(lines);
         return;
     }
 
-    // Cancel previous request
     if (extractController) {
         extractController.abort();
     }
@@ -112,7 +112,7 @@ async function handleExtract() {
         renderResult(data);
         saveToHistory(data);
     } catch (err) {
-        if (err.name === 'AbortError') return; // cancelled, ignore
+        if (err.name === 'AbortError') return;
         showError('网络错误: ' + err.message);
     } finally {
         setLoading(false);
@@ -143,7 +143,6 @@ async function handleBatchExtract(urls) {
             return;
         }
 
-        // Render first successful result, show batch summary
         const successes = data.results.filter(r => r.success);
         const failures = data.results.filter(r => !r.success);
 
@@ -175,6 +174,11 @@ function setLoading(loading) {
     btn.querySelector('.btn-text').style.display = loading ? 'none' : 'inline';
     btn.querySelector('.btn-loading').style.display = loading ? 'inline-flex' : 'none';
     btn.disabled = loading;
+    if (loading) {
+        btn.style.opacity = '0.8';
+    } else {
+        btn.style.opacity = '1';
+    }
 }
 
 // ===== Render Result =====
@@ -219,8 +223,6 @@ function renderResult(data) {
         const videoPlayer = document.getElementById('videoPlayer');
         videoPlayer.src = `/api/proxy-video?url=${encodeURIComponent(data.video_url)}`;
         videoPlayer.load();
-
-        // Video quality selector
         renderVideoQuality(data.video_streams || []);
     } else {
         videoSection.style.display = 'none';
@@ -242,7 +244,9 @@ function renderResult(data) {
         item.innerHTML = `
             <img src="${proxiedUrl}" alt="图片 ${i + 1}" loading="lazy">
             <span class="image-index">${i + 1}</span>
-            <button class="image-download-btn" onclick="downloadSingle(${i}, event)" title="下载此图" aria-label="下载图片 ${i + 1}">↓</button>
+            <button class="image-download-btn" onclick="downloadSingle(${i}, event)" title="下载此图" aria-label="下载图片 ${i + 1}">
+                <span class="material-symbols-outlined" style="font-size: 18px;">download</span>
+            </button>
         `;
         gallery.appendChild(item);
     });
@@ -260,23 +264,39 @@ function renderVideoQuality(streams) {
     const container = document.getElementById('videoQuality');
     if (!container) return;
 
-    if (!streams || streams.length <= 1) {
+    if (!streams || streams.length === 0) {
+        container.style.display = 'none';
+        return;
+    }
+
+    // Deduplicate by height first
+    const seen = new Set();
+    const unique = [];
+    streams.forEach(s => {
+        const key = `${s.height}p`;
+        if (!seen.has(key)) {
+            seen.add(key);
+            unique.push(s);
+        }
+    });
+
+    // Hide if only one quality available
+    if (unique.length <= 1) {
         container.style.display = 'none';
         return;
     }
 
     container.style.display = 'flex';
     container.innerHTML = '<span class="quality-label">画质：</span>';
-    // Deduplicate by height
-    const seen = new Set();
-    streams.forEach(s => {
-        const key = `${s.height}p`;
-        if (seen.has(key)) return;
-        seen.add(key);
+    unique.forEach((s, i) => {
         const btn = document.createElement('button');
-        btn.className = 'quality-btn';
+        btn.className = 'quality-btn' + (i === 0 ? ' quality-btn-active' : '');
         btn.textContent = s.label;
-        btn.onclick = () => switchVideoQuality(s.url);
+        btn.onclick = () => {
+            container.querySelectorAll('.quality-btn').forEach(b => b.classList.remove('quality-btn-active'));
+            btn.classList.add('quality-btn-active');
+            switchVideoQuality(s.url);
+        };
         container.appendChild(btn);
     });
 }
@@ -290,7 +310,6 @@ function switchVideoQuality(url) {
         player.currentTime = currentTime;
         player.play();
     }, { once: true });
-    // Update currentData
     if (currentData) currentData.video_url = url;
     showToast('切换画质中...');
 }
@@ -340,7 +359,6 @@ function saveToHistory(data) {
         type: data.type || 'normal',
         time: Date.now(),
     };
-    // Deduplicate by note_id
     history = history.filter(h => h.note_id !== entry.note_id);
     history.unshift(entry);
     if (history.length > HISTORY_MAX) history = history.slice(0, HISTORY_MAX);
@@ -439,7 +457,6 @@ async function downloadAll() {
             return;
         }
 
-        // Stream with progress
         const contentLength = +resp.headers.get('Content-Length') || 0;
         const reader = resp.body.getReader();
         const chunks = [];
@@ -527,7 +544,6 @@ async function downloadVideo() {
             if (contentLength && progressBar) {
                 const pct = Math.min(100, (received / contentLength) * 100);
                 progressBar.querySelector('.progress-fill').style.width = pct + '%';
-                // Show size
                 const mb = (received / 1024 / 1024).toFixed(1);
                 const totalMb = (contentLength / 1024 / 1024).toFixed(1);
                 progressBar.querySelector('.progress-text').textContent = `${mb}MB / ${totalMb}MB`;
@@ -606,7 +622,7 @@ function openLightbox(index) {
 }
 
 function closeLightbox(event) {
-    if (event && event.target !== event.currentTarget && !event.target.classList.contains('lightbox-close')) return;
+    if (event && event.target !== event.currentTarget && !event.target.closest('[onclick*="closeLightbox"]')) return;
     document.getElementById('lightbox').style.display = 'none';
     document.body.style.overflow = '';
 }
@@ -644,7 +660,6 @@ function setupSwipeGestures() {
     lightbox.addEventListener('touchend', (e) => {
         const dx = e.changedTouches[0].clientX - touchStartX;
         const dy = e.changedTouches[0].clientY - touchStartY;
-        // Only trigger if horizontal swipe > 60px and more horizontal than vertical
         if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) {
             if (dx > 0) navigateLightbox(-1);
             else navigateLightbox(1);
@@ -670,8 +685,7 @@ document.addEventListener('keydown', (e) => {
 function showError(msg) {
     document.getElementById('errorText').textContent = msg;
     const box = document.getElementById('errorBox');
-    box.style.display = 'flex';
-    // Auto-dismiss after 6s
+    box.style.display = 'block';
     clearTimeout(box._dismissTimer);
     box._dismissTimer = setTimeout(() => hideError(), 6000);
 }
@@ -697,6 +711,6 @@ function showToast(msg) {
     requestAnimationFrame(() => toast.classList.add('show'));
     setTimeout(() => {
         toast.classList.remove('show');
-        setTimeout(() => toast.remove(), 300);
+        setTimeout(() => toast.remove(), 400);
     }, 2500);
 }
