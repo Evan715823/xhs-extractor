@@ -364,7 +364,12 @@ body {
 
 /* ===== Lightbox ===== */
 @media (max-width: 767px) {
-    .lightbox-nav { display: none; }
+    .lightbox-nav {
+        width: 36px;
+        height: 36px;
+        font-size: 1rem;
+        opacity: 0.7;
+    }
 }
 
 /* ===== Scrollbar ===== */

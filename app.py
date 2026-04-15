@@ -8,6 +8,7 @@ import os
 import time
 import zipfile
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, render_template, request, send_file
@@ -92,16 +93,23 @@ def api_batch_extract():
     if len(urls) > 10:
         return jsonify({"error": "一次最多提取10个链接"}), 400
 
-    results = []
-    for url in urls:
-        url = url.strip()
-        if not url:
-            continue
+    clean_urls = [u.strip() for u in urls if u.strip()]
+
+    def _extract_one(url):
         try:
             result = extract_note(url, cookie=XHS_COOKIE)
-            results.append({"success": True, "data": result})
+            return {"success": True, "data": result}
         except Exception as e:
-            results.append({"success": False, "error": str(e), "url": url})
+            return {"success": False, "error": str(e), "url": url}
+
+    results = []
+    with ThreadPoolExecutor(max_workers=min(len(clean_urls), 4)) as pool:
+        futures = {pool.submit(_extract_one, u): u for u in clean_urls}
+        for future in as_completed(futures, timeout=120):
+            try:
+                results.append(future.result())
+            except Exception as e:
+                results.append({"success": False, "error": str(e), "url": futures[future]})
 
     return jsonify({"results": results})
 

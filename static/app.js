@@ -58,13 +58,11 @@ function updateThemeIcon() {
 function setupPasteHandler() {
     const input = document.getElementById('urlInput');
     if (!input) return;
-    input.addEventListener('paste', () => {
-        setTimeout(() => {
-            const val = input.value.trim();
-            if (val && (val.includes('xhslink.com') || val.includes('xiaohongshu.com'))) {
-                handleExtract();
-            }
-        }, 100);
+    input.addEventListener('paste', (e) => {
+        const pasted = (e.clipboardData || window.clipboardData)?.getData('text') || '';
+        if (pasted && (pasted.includes('xhslink.com') || pasted.includes('xiaohongshu.com'))) {
+            setTimeout(() => handleExtract(), 0);
+        }
     });
 }
 
@@ -551,16 +549,20 @@ async function downloadVideo() {
         }
 
         const blob = new Blob(chunks, { type: 'video/mp4' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        const safeTitle = (currentData.title || 'xhs_video').replace(/[^\w\u4e00-\u9fff _-]/g, '').slice(0, 50);
-        a.download = `${safeTitle}.mp4`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        showToast('视频下载完成');
+        let blobUrl = null;
+        try {
+            blobUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            const safeTitle = (currentData.title || 'xhs_video').replace(/[^\w\u4e00-\u9fff _-]/g, '').slice(0, 50);
+            a.download = `${safeTitle}.mp4`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            showToast('视频下载完成');
+        } finally {
+            if (blobUrl) URL.revokeObjectURL(blobUrl);
+        }
     } catch (err) {
         showError('视频下载失败: ' + err.message);
     } finally {
@@ -660,7 +662,7 @@ function setupSwipeGestures() {
     lightbox.addEventListener('touchend', (e) => {
         const dx = e.changedTouches[0].clientX - touchStartX;
         const dy = e.changedTouches[0].clientY - touchStartY;
-        if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+        if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy) * 1.5) {
             if (dx > 0) navigateLightbox(-1);
             else navigateLightbox(1);
         }

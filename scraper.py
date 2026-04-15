@@ -5,6 +5,7 @@ Extracts images, text, and metadata from Xiaohongshu note URLs.
 
 import json
 import re
+import threading
 import time
 from functools import lru_cache
 from hashlib import md5
@@ -36,6 +37,7 @@ _http_pool = httpx.Client(
 
 # Simple TTL cache for proxied images: {url_hash: (bytes, content_type, timestamp)}
 _image_cache: dict[str, tuple[bytes, str, float]] = {}
+_cache_lock = threading.Lock()
 _CACHE_TTL = 3600  # 1 hour
 _CACHE_MAX = 200   # max entries
 
@@ -119,6 +121,29 @@ _ORIGINAL_CDN = "https://sns-img-bd.xhscdn.com"
 
 # CDN host for watermark-free videos
 _VIDEO_CDN_NO_WM = "https://sns-video-bd.xhscdn.com"
+
+# Allowed CDN domains for proxy endpoints (SSRF protection)
+_ALLOWED_PROXY_DOMAINS = {
+    "sns-img-bd.xhscdn.com",
+    "sns-img-hw.xhscdn.com",
+    "sns-img-qc.xhscdn.com",
+    "ci.xiaohongshu.com",
+    "picasso-static.xiaohongshu.com",
+    "sns-video-bd.xhscdn.com",
+    "sns-video-hw.xhscdn.com",
+    "sns-video-qc.xhscdn.com",
+    "sns-video-al.xhscdn.com",
+}
+
+
+def _is_allowed_proxy_url(url: str) -> bool:
+    """Check if the URL points to an allowed XHS CDN domain."""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        return parsed.hostname in _ALLOWED_PROXY_DOMAINS
+    except Exception:
+        return False
 
 
 def _get_nowatermark_video_url(stream_url: str, origin_video_key: str = "") -> str:
@@ -441,7 +466,7 @@ def _build_result_from_state(note_data: dict, note_id: str) -> dict:
 
 
 def _cache_cleanup():
-    """Evict expired or excess cache entries."""
+    """Evict expired or excess cache entries. Caller must hold _cache_lock."""
     now = time.time()
     expired = [k for k, (_, _, ts) in _image_cache.items() if now - ts > _CACHE_TTL]
     for k in expired:
@@ -455,13 +480,17 @@ def _cache_cleanup():
 
 def proxy_image(image_url: str, cookie: str = "") -> tuple[bytes, str]:
     """Fetch image through proxy with caching and content-type validation."""
+    if not _is_allowed_proxy_url(image_url):
+        raise ValueError("不允许代理该域名的资源")
+
     cache_key = md5(image_url.encode()).hexdigest()
 
     # Check cache
-    if cache_key in _image_cache:
-        data, ct, ts = _image_cache[cache_key]
-        if time.time() - ts < _CACHE_TTL:
-            return data, ct
+    with _cache_lock:
+        if cache_key in _image_cache:
+            data, ct, ts = _image_cache[cache_key]
+            if time.time() - ts < _CACHE_TTL:
+                return data, ct
 
     def do_fetch():
         resp = _http_pool.get(image_url)
@@ -479,15 +508,19 @@ def proxy_image(image_url: str, cookie: str = "") -> tuple[bytes, str]:
     data = resp.content
 
     # Cache it
-    _image_cache[cache_key] = (data, content_type, time.time())
-    if len(_image_cache) > _CACHE_MAX + 20:
-        _cache_cleanup()
+    with _cache_lock:
+        _image_cache[cache_key] = (data, content_type, time.time())
+        if len(_image_cache) > _CACHE_MAX + 20:
+            _cache_cleanup()
 
     return data, content_type
 
 
 def proxy_video_stream(video_url: str, range_header: str = "", cookie: str = ""):
     """Stream video through proxy with Range request support for seeking."""
+    if not _is_allowed_proxy_url(video_url):
+        raise ValueError("不允许代理该域名的资源")
+
     headers = {
         "User-Agent": HEADERS["User-Agent"],
         "Referer": "https://www.xiaohongshu.com/",
@@ -496,11 +529,19 @@ def proxy_video_stream(video_url: str, range_header: str = "", cookie: str = "")
         headers["Range"] = range_header
 
     client = httpx.Client(follow_redirects=True, headers=headers, timeout=60)
-    resp = client.send(
-        client.build_request("GET", video_url),
-        stream=True,
-    )
-    resp.raise_for_status()
+    try:
+        resp = client.send(
+            client.build_request("GET", video_url),
+            stream=True,
+        )
+        resp.raise_for_status()
+    except Exception:
+        client.close()
+        raise
+
+    content_type = resp.headers.get("Content-Type", "video/mp4")
+    if not content_type.startswith("video/"):
+        content_type = "video/mp4"
 
     def generate():
         try:
@@ -512,7 +553,7 @@ def proxy_video_stream(video_url: str, range_header: str = "", cookie: str = "")
 
     return {
         "status_code": resp.status_code,
-        "content_type": resp.headers.get("Content-Type", "video/mp4"),
+        "content_type": content_type,
         "content_length": resp.headers.get("Content-Length", ""),
         "content_range": resp.headers.get("Content-Range", ""),
         "accept_ranges": resp.headers.get("Accept-Ranges", "bytes"),

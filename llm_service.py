@@ -4,6 +4,7 @@ Supports Grok (xAI), OpenAI, and Anthropic APIs for content summarization.
 """
 
 import os
+import time
 
 SYSTEM_PROMPT = """你是一个专业的内容分析助手。请对以下小红书笔记内容进行简洁有深度的总结分析。
 
@@ -39,40 +40,61 @@ def summarize(title: str, desc: str, tags: list[str]) -> str:
         return _call_openai(api_key, model, base_url, user_message)
 
 
+def _retry_llm(fn, retries=1, delay=2.0):
+    """Retry LLM call with simple backoff."""
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(delay)
+    raise last_err
+
+
 def _call_openai(api_key: str, model: str, base_url: str, user_message: str) -> str:
     from openai import OpenAI
 
-    kwargs = {"api_key": api_key}
+    kwargs = {"api_key": api_key, "timeout": 60.0}
     if base_url:
         kwargs["base_url"] = base_url
 
     client = OpenAI(**kwargs)
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        max_tokens=1024,
-        temperature=0.7,
-    )
-    return response.choices[0].message.content
+
+    def do_call():
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            max_tokens=1024,
+            temperature=0.7,
+        )
+        return response.choices[0].message.content
+
+    return _retry_llm(do_call)
 
 
 def _call_anthropic(api_key: str, model: str, base_url: str, user_message: str) -> str:
     from anthropic import Anthropic
 
-    kwargs = {"api_key": api_key}
+    kwargs = {"api_key": api_key, "timeout": 60.0}
     if base_url:
         kwargs["base_url"] = base_url
 
     client = Anthropic(**kwargs)
-    response = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        messages=[
-            {"role": "user", "content": user_message},
-        ],
-    )
-    return response.content[0].text
+
+    def do_call():
+        response = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=SYSTEM_PROMPT,
+            messages=[
+                {"role": "user", "content": user_message},
+            ],
+        )
+        return response.content[0].text
+
+    return _retry_llm(do_call)
